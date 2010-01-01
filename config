@@ -1,0 +1,5 @@
+
+BitServer.Endpoints=default -p 10000
+BitServer.ThreadPool.Size=1
+BitServer.ThreadPool.SizeMax=10
+
