@@ -1,0 +1,184 @@
+人人网中间层：实践篇
+by UGC.FM
+作者：人人网技术经理 白伯纯  人人网UGC团队博客
+
+人人网中间层：问题篇
+
+人人网中间层：求解篇
+
+之前的问题篇和求解篇描述了人人网在发展过程中遇到的问题，并且介绍了我们采用中间层来提高性能的解决方案。今天的实践篇将通过一个例子来实现一个中间层服务。
+这个服务要达到的目的是快速的查询用户是否有效，数据将要使用bitset保存在内存中，每个用户一位，仅保存正整数约21亿，占用内存256M。
+
+开始编码
+
+下面的代码都在这个位置保存：http://gitorious.org/renren/bitserver。
+
+接口定义
+
+定义接口如下：
+
+#include <Ice/BuiltinSequences.ice>
+module renren {
+struct BitSegment {
+int begin;
+int end;
+Ice::ByteSeq data;
+};
+interface BitServer {
+bool get(int offset);
+Ice::BoolSeq gets(Ice::IntSeq offsets);
+BitSegment getSegment(int begin, int end);
+};
+};
+这个BitServer.ice文件，通过slice2cpp命令编译成为服务端的Skeleton文件：
+
+slice2cpp -I/opt/Ice-3.3/slice BitServer.ice
+服务端
+
+有了上面生成的服务端文件后，就可以实现我们自己的业务功能了。
+BitServerI.h和BitServerI.cpp，暂时只是实现了单个get的接口。
+
+#ifndef __BitServerI_h__
+#define __BitServerI_h__#include <BitServer.h>
+#define SIZE_OF_BIT 2147483647
+#include <bitset>
+
+namespace renren
+{
+
+class BitServerI : virtual public BitServer
+{
+public:
+void initialize();
+
+virtual bool get(::Ice::Int,
+const Ice::Current&);
+
+virtual ::Ice::BoolSeq gets(const ::Ice::IntSeq&,
+const Ice::Current&);
+
+virtual ::renren::BitSegment getSegment(::Ice::Int,
+::Ice::Int,
+const Ice::Current&);
+private:
+std::bitset<SIZE_OF_BIT> bits_;
+};
+
+}
+
+#endif
+
+#include <BitServerI.h>
+#include <Ice/Ice.h>int main(int argc, char** argv) {
+int status = 0;
+Ice::CommunicatorPtr ic;
+try{
+ic = Ice::initialize(argc, argv);
+Ice::ObjectAdapterPtr adapter = ic->createObjectAdapter(“BitServer”);
+renren::BitServerI* obj = new renren::BitServerI;
+obj->initialize();
+adapter->add(obj, ic->stringToIdentity(“BitServer”));
+adapter->activate();
+ic->waitForShutdown();
+} catch (const Ice::Exception& e) {
+std::cerr << e << std::endl;
+status = 1;
+} catch (const std::exception& e) {
+std::cerr << e.what() << std::endl;
+status = 1;
+} catch (…) {
+std::cerr << “unknown exception” << std::endl;
+status = 1;
+}
+if (ic) {
+try {
+ic->destroy();
+} catch (const Ice::Exception& e) {
+std::cerr << e << std::endl;
+status = 1;
+} catch (const std::exception& e) {
+std::cerr << e.what() << std::endl;
+status = 1;
+} catch (…) {
+std::cerr << “unknown exception” << std::endl;
+status = 1;
+}
+}
+return status;
+}
+void
+renren::BitServerI::initialize() {
+for (int i=0; i<0xFFFFF;i=i+2) {
+bits_[i]=true;
+}
+}
+
+bool
+renren::BitServerI::get(::Ice::Int offset,
+const Ice::Current& current)
+{
+if(offset < 0) return false;
+return bits_[offset];
+}
+
+::Ice::BoolSeq
+renren::BitServerI::gets(const ::Ice::IntSeq& offsets,
+const Ice::Current& current)
+{
+return ::Ice::BoolSeq();
+}
+
+::renren::BitSegment
+renren::BitServerI::getSegment(::Ice::Int begin,
+::Ice::Int end,
+const Ice::Current& current)
+{
+return ::renren::BitSegment();
+}
+
+客户端
+
+我们使用Java作为客户端，首先用slice2java工具生成Java的Proxy类。
+
+slice2java -I/opt/Ice-3.3/slice BitServer.ice
+然后自己实现客户端代码：
+
+package renren;class BitServerAdapter {
+private final String endpoints_;
+private Ice.Communicator ic_;
+private renren.BitServerPrx prx_;
+public BitServerAdapter(String endpoints) {
+this.endpoints_ = endpoints;
+}
+
+public void initialize() {
+ic_ = Ice.Util.initialize();
+prx_ = renren.BitServerPrxHelper.uncheckedCast(ic_.stringToProxy(endpoints_));
+}
+
+public boolean get(int id) {
+return prx_.get(id);
+}
+
+public static void main(String[] args) {
+BitServerAdapter adapter = new BitServerAdapter(args[0]);
+adapter.initialize();
+boolean ret = adapter.get(Integer.valueOf(args[1]));
+System.out.println(ret);
+System.exit(0);
+}
+}
+
+性能测试
+
+完成了代码，来测试一下性能吧。
+首先启动服务器
+
+target/bitserver –Ice.Config=config
+再启动客户端
+
+java -cp /opt/Ice-3.3/lib/Ice.jar:target/bitclient.jar \
+renren.BitServerAdapter “BitServer:default -p 10000” 1022
+在客户端调用增加循环50000次，单线程平均每秒处理一万次。
+
+在多线程的环境下，单个服务器每秒可处理的请求8万次左右，已经超过了目前的需要。
